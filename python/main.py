@@ -130,8 +130,10 @@ if __name__ == "__main__":
     except ValueError:
         pass  # mask is not mandatory
 
-    all_fisheye_images = Parallel(n_jobs=-1, backend="threading")(
-        delayed(read_input_images)(
+    # ここからリアルタイム処理風に1フレームずつ処理
+    for filename in sorted(filenames):
+        # 1フレーム分の画像を読み込む
+        all_fisheye_images = read_input_images(
             filename,
             args.dataset_path,
             args.matching_resolution,
@@ -139,14 +141,9 @@ if __name__ == "__main__":
             calibrations,
             args.references_indices,
         )
-        for filename in filenames
-    )
-
-    rgbd_panoramas = {}
-    for frame_index, filename in enumerate(filenames):
-        fisheye_images = all_fisheye_images[frame_index]["images_to_match"]
-        reference_fisheye_images = all_fisheye_images[frame_index]["images_to_stitch"]
-        valid_frame = all_fisheye_images[frame_index]["is_valid"]
+        fisheye_images = all_fisheye_images["images_to_match"]
+        reference_fisheye_images = all_fisheye_images["images_to_stitch"]
+        valid_frame = all_fisheye_images["is_valid"]
 
         if valid_frame:
             fisheye_images = [
@@ -161,7 +158,7 @@ if __name__ == "__main__":
                 fisheye_images, reference_fisheye_images
             )
 
-            rgbd_panoramas[filename] = {
+            rgbd_panorama = {
                 "rgb": rgb.cpu().numpy(),
                 "inv_distance": 1 / distance.cpu().numpy(),
             }
@@ -169,66 +166,34 @@ if __name__ == "__main__":
             if args.visualize:
                 # Map inverse distance to [0, 255] and display
                 distance_map = 1 / distance.cpu().numpy()
-                distance_map = (
-                    rgbd_panoramas[filename]["inv_distance"] - 1 / args.max_dist
-                ) / (1 / args.min_dist - 1 / args.max_dist)
+                distance_map = (rgbd_panorama["inv_distance"] - 1 / args.max_dist) / (
+                    1 / args.min_dist - 1 / args.max_dist
+                )
                 distance_map = np.clip(255 * distance_map, 0, 255).astype(np.uint8)
                 distance_map = cv2.applyColorMap(distance_map, cv2.COLORMAP_MAGMA)
                 cv2.imshow("distance_map", distance_map)
-                cv2.imshow("rgb", rgbd_panoramas[filename]["rgb"])
-                cv2.waitKey()
+                cv2.imshow("rgb", rgbd_panorama["rgb"])
+                key = cv2.waitKey(1)
+                if key == 27:  # ESCで終了
+                    break
 
-    if args.saving:
-        Path(os.path.join(args.dataset_path, "output")).mkdir(
-            parents=True, exist_ok=True
-        )
-        Parallel(n_jobs=-1, backend="threading")(
-            delayed(save_rgbd_panorama)(rgbd_panoramas, filename, args.dataset_path)
-            for filename in filenames
-        )
-
-    if args.evaluate:
-        evaluations = Parallel(n_jobs=-1, backend="threading")(
-            delayed(evaluate_rgbd_panorama)(
-                rgbd_panoramas,
-                filename,
-                args.dataset_path,
-                args.bad_px_ratio_thresholds,
-                args.panorama_resolution,
-            )
-            for filename in filenames
-        )
-
-        # Average the evaluation metrics
-        psnr = 0
-        ssim = 0
-        rmse = 0
-        mae = 0
-        bad_px_ratios = [0] * len(args.bad_px_ratio_thresholds)
-        evaluation_count = 0
-
-        for evaluation in evaluations:
-            if evaluation is not None:
-                psnr += evaluation["psnr"]
-                ssim += evaluation["ssim"]
-                rmse += evaluation["rmse"]
-                mae += evaluation["mae"]
-                bad_px_ratios = [
-                    bad_px_ratio + current_bad_px_ratio
-                    for bad_px_ratio, current_bad_px_ratio in zip(
-                        bad_px_ratios, evaluation["bad_px_ratios"]
-                    )
-                ]
-                evaluation_count += 1
-
-        if evaluation_count > 0:
-            print("PSNR = ", psnr / evaluation_count)
-            print("SSIM = ", ssim / evaluation_count)
-            for bad_px_ratio, bad_px_ratio_threshold in zip(
-                bad_px_ratios, args.bad_px_ratio_thresholds
-            ):
-                print(
-                    ">", bad_px_ratio_threshold, " = ", bad_px_ratio / evaluation_count
+            if args.saving:
+                Path(os.path.join(args.dataset_path, "output")).mkdir(
+                    parents=True, exist_ok=True
                 )
-            print("MAE = ", mae / evaluation_count)
-            print("RMSE = ", rmse / evaluation_count)
+                save_rgbd_panorama(
+                    {filename: rgbd_panorama}, filename, args.dataset_path
+                )
+
+            if args.evaluate:
+                evaluation = evaluate_rgbd_panorama(
+                    {filename: rgbd_panorama},
+                    filename,
+                    args.dataset_path,
+                    args.bad_px_ratio_thresholds,
+                    args.panorama_resolution,
+                )
+                if evaluation is not None:
+                    print(
+                        f"{filename}: PSNR={evaluation['psnr']}, SSIM={evaluation['ssim']}, MAE={evaluation['mae']}, RMSE={evaluation['rmse']}"
+                    )
